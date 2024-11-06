@@ -1,0 +1,757 @@
+#import all the required libraries
+
+import pyrealsense2 as rs
+
+import numpy as np
+
+import cv2
+
+from ultralytics import YOLO
+
+import math
+
+import datetime
+
+import requests
+
+import base64
+
+import serial
+
+import argparse
+
+import threading
+
+import time
+
+import json
+
+
+
+# link to NodeRed
+
+node_red_url = "http://127.0.0.1:1880/detection" # Define the URL for the Node-RED endpoint
+
+
+
+# Define the output file for logging
+
+output_file = "/home/melvin/Projects/YOLO/FYP_presentation_leaf/FinalOutput.txt"  # Set the path for the output log file
+
+
+
+# Define the output file for depth
+
+depth_file = "/home/melvin/Projects/YOLO/FYP_presentation_leaf/DepthOutput.txt"  # Set the path for the output log file
+
+
+
+# Function to clear the contents of the file
+
+def clear_file(file):
+
+    with open(file, 'w') as file:
+
+        pass  # Opening the file in 'w' mode will clear its contents
+
+
+
+clear_file(output_file)  # Clear the contents of the output file before starting
+
+clear_file(depth_file)  # Clear the contents of the output file before starting
+
+
+
+# Global variables
+
+ser = None
+
+current_angles = {'base': 0, 'shoulder': 0, 'elbow': 1.57, 'hand':3.14,}
+
+# shoulder_movement_done = False  # Flag to track completion of shoulder movement
+
+
+
+def read_serial():
+
+    global ser, current_angles
+
+    buffer = ""
+
+    while True:
+
+        try:
+
+            data = ser.readline().decode('utf-8').strip()
+
+            if data:
+
+                buffer += data
+
+                try:
+
+                    json_data = json.loads(buffer)
+
+                    if 'T' in json_data and json_data['T'] == 1051:
+
+                        current_angles['base'] = float(json_data['b'])
+
+                        current_angles['shoulder'] = float(json_data['s'])
+
+                        current_angles['elbow'] = float(json_data['e'])
+
+                    buffer = ""  # Clear buffer after successful parse
+
+                except json.JSONDecodeError:
+
+                    pass  # Incomplete JSON data, waiting for more data...
+
+                except KeyError as e:
+
+                    print(f"Missing key in JSON data received: {e}")
+
+                    buffer = ""  # Clear buffer on error to avoid endless loop
+
+        except Exception as e:
+
+            print(f"Error reading serial data: {e}")
+
+
+
+def send_command(command):
+
+    try:
+
+        ser.write(command.encode() + b'\n')
+
+    except Exception as e:
+
+        print(f"Error sending command: {e}")
+
+
+
+def process_frame(frame, x1, y1, x2, y2, cls_name, desired_position, tolerance):
+
+    print("process frame")
+
+    center_x = (x1 + x2) // 2
+
+    center_y = (y1 + y2) // 2
+
+
+
+    # Draw the bounding box and center
+
+    cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+
+    cv2.circle(frame, (center_x, center_y), 5, (0, 0, 255), -1)
+
+    
+
+    # Draw the label on the frame
+
+    org = (x1, y1)  # Set the position for the label
+
+    font = cv2.FONT_HERSHEY_SIMPLEX  # Set the font for the label
+
+    fontScale = 1  # Set the font scale
+
+    color = (255, 0, 0)  # Set the color for the label
+
+    thickness = 2  # Set the thickness of the label
+
+    cv2.putText(frame, cls_name, org, font, fontScale, color, thickness)  # Draw the label
+
+
+
+    # Check if the QR code is within the desired position with tolerance
+
+    if abs(center_x - desired_position[0]) > tolerance or abs(center_y - desired_position[1]) > tolerance:
+
+        return center_x, center_y, False  # QR code not in position
+
+    return center_x, center_y, True  # QR code in position
+
+
+
+def move_arm_to_position(frame, desired_position, tolerance, x1, y1, x2, y2, cls_name):
+
+    print("inside move arm")
+
+    global current_angles, shoulder_movement_done
+
+    center_x, center_y, in_position = process_frame(frame, x1, y1, x2, y2, cls_name, desired_position, tolerance)
+
+    print(str(center_x) + str(center_y))
+
+    
+
+    if center_x is not None and center_y is not None:
+
+        if desired_position[0] + tolerance > center_x:
+
+            current_angles['base'] += 0.004
+
+            print("Right")
+
+        if center_y > desired_position[1] + tolerance:
+
+            current_angles['shoulder'] += 0.009
+
+            current_angles['elbow'] -= 0.009
+
+        '''
+
+        if desired_position[0] + tolerance < center_x:
+
+            current_angles['base'] -= 0.001
+
+            print("Left")
+
+        if center_y < desired_position[1] + tolerance:
+
+            current_angles['shoulder'] -= 0.001
+
+            current_angles['elbow'] += 0.001
+
+        if desired_position[0] == center_x:
+
+            current_angles['base'] -= 0
+
+            print("Stopped")
+
+        if desired_position[1] == center_y:
+
+            current_angles['shoulder'] -= 0
+
+            current_angles['elbow'] += 0'''
+
+
+
+        command = f'{{"T":102,"base":{current_angles["base"]},"shoulder":{current_angles["shoulder"]},"elbow":{current_angles["elbow"]},"hand":3.14,"spd":100,"acc":0}}'
+
+        send_command(command)
+
+        print(f"Moving arm: base={current_angles['base']}, shoulder={current_angles['shoulder']}, elbow={current_angles['elbow']}")
+
+        time.sleep(0)  # Allow time for the arm to move before capturing the next frame
+
+
+
+def main():
+
+    global ser, current_angles
+
+    parser = argparse.ArgumentParser(description='Serial JSON Communication for RoArm-M2-S')
+
+    parser.add_argument("--port", type=str, default = '/dev/ttyUSB0', help='Serial port name (e.g., COM1 or /dev/ttyUSB0)')
+
+    #parser.add_argument('port', type=str, help='Serial port name (e.g., COM1 or /dev/ttyUSB0)')
+
+    args = parser.parse_args()
+
+
+
+    try:
+
+        ser = serial.Serial(args.port, baudrate=115200, dsrdtr=None, timeout=1)
+
+        ser.setRTS(False)
+
+        ser.setDTR(False)
+
+    except Exception as e:
+
+        print(f"Error opening serial port: {e}")
+
+        return
+
+
+
+    serial_recv_thread = threading.Thread(target=read_serial)
+
+    serial_recv_thread.daemon = True
+
+    serial_recv_thread.start()
+
+    
+
+    # Configure depth and color streams
+
+    pipeline = rs.pipeline() # Create a RealSense pipeline to manage the stream configuration and state
+
+    config = rs.config() # Create a configuration for the pipeline
+
+
+
+    # Get device product line for setting a supporting resolution
+
+    pipeline_wrapper = rs.pipeline_wrapper(pipeline)  # Wrap the pipeline to enable device information retrieval
+
+    pipeline_profile = config.resolve(pipeline_wrapper) # Resolve the pipeline configuration to get the pipeline profile
+
+    device = pipeline_profile.get_device() # Get the device from the pipeline profile
+
+    device_product_line = str(device.get_info(rs.camera_info.product_line)) # Get the product line of the device
+
+    #print the info collected
+
+    print(device_product_line)
+
+    print(device.get_info(rs.camera_info.name))
+
+
+
+    #checking if the RealSense camera device has an RGB camera sensor
+
+    found_rgb = False # Initialize a flag to check for the presence of an RGB camera
+
+    
+
+    for s in device.sensors: # Iterate through the sensors available in the device
+
+        if s.get_info(rs.camera_info.name) == 'RGB Camera': # Check if the sensor is an RGB camera
+
+            found_rgb = True # Set the flag to True if an RGB camera is found
+
+            break # Exit the loop the RGB camera is not found
+
+
+
+    #print error msg if RGB camera is not found
+
+    if not found_rgb:
+
+        print("The demo requires Depth camera with Color sensor")
+
+        exit(0)
+
+
+
+    # Enable depth and color streams with specified resolutions and formats
+
+    config.enable_stream(rs.stream.depth, 640, 480, rs.format.z16, 30)  # Enable depth stream at 640x480 resolution, 16-bit depth, 30 FPS (frame per second)
+
+    config.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 30)  # Enable color stream at 640x480 resolution, BGR format, 30 FPS
+
+
+
+    # Start streaming 
+
+    #pipeline is started and stopped and started again to eliminate error of not opening the camera in previous running of code
+
+    pipeline.start(config)
+
+    pipeline.stop()
+
+    pipeline.start(config)
+
+
+
+    print("cam start")
+
+    
+
+    #function to find the depth at specific point
+
+    def get_depth_at_point(depth_frame, x, y):
+
+        return depth_frame.get_distance(x, y)
+
+
+
+    # Create an OpenCV window named 'RealSense'
+
+    cv2.namedWindow('RealSense', cv2.WINDOW_AUTOSIZE)
+
+        
+
+    # Load the pretrained YOLO model
+
+    model = YOLO('/home/melvin/Projects/YOLO/FYP_presentation_leaf/Final3_weight/weights/best.pt')  # Load the pre-trained YOLO model from the specified path
+
+
+
+    margin = 50
+
+    desired_position = (640 - 80, margin)
+
+    tolerance = 20
+
+
+
+    default_position_command = '{"T":102,"base":0,"shoulder":0,"elbow":1.57,"hand":3.14,"spd":0,"acc":10}'
+
+    send_command(default_position_command)
+
+    time.sleep(2)
+
+    
+
+    initial_command = '{"T":105}'
+
+    send_command(initial_command)
+
+    time.sleep(1)
+
+    
+
+    # Define the class names
+
+    classNames = ['QR', 'kale', 'person']  # List of class names corresponding to the YOLO model
+
+
+
+    # Initialize the start time for logging purposes
+
+    startTime = datetime.datetime.now()  # Record the start time
+
+
+
+    # Initialize counters
+
+    frame_count = 0  # Counter for the number of frames processed
+
+    
+
+    #try block is used for continuous operations
+
+    try:
+
+        #Start an infinite loop to continuously capture and process frames
+
+        while True:
+
+            frames = pipeline.wait_for_frames() #Wait for the next set of frames from the camera
+
+            depth_frame = frames.get_depth_frame() #Extract the depth frame from the set of frames
+
+            color_frame = frames.get_color_frame() #Extract the color frame from the set of frames
+
+            if not depth_frame or not color_frame: #Check if either depth or color frame is unavailable
+
+                continue #If any frame is missing, skip the rest of the loop and wait for the next set of frames
+
+
+
+            #Convert the depth and color frames to numpy arrays for further processing
+
+            depth_image = np.asanyarray(depth_frame.get_data())
+
+            color_image = np.asanyarray(color_frame.get_data())
+
+
+
+            #Apply a colormap to the depth image to visualize it better
+
+            depth_colormap = cv2.applyColorMap(cv2.convertScaleAbs(depth_image, alpha=0.03), cv2.COLORMAP_JET)
+
+            
+
+            #Get the dimensions of the depth colormap and the color image
+
+            depth_colormap_dim = depth_colormap.shape
+
+            color_colormap_dim = color_image.shape
+
+
+
+            #Check if the dimensions of the depth colormap and the color image match
+
+            if depth_colormap_dim != color_colormap_dim:
+
+                resized_color_image = cv2.resize(color_image, dsize=(depth_colormap_dim[1], depth_colormap_dim[0]), interpolation=cv2.INTER_AREA)
+
+                images = np.hstack((resized_color_image, depth_colormap))
+
+            else:
+
+                images = np.hstack((color_image, depth_colormap))
+
+            # The 'images' variable now contains the combined image, which can be displayed or processed further
+
+
+
+            frame_count += 1  # Increment the frame counter
+
+            # Initializing the required variables
+
+            kale_count = 0 
+
+            min_confidence = 0
+
+            max_confidence = 0
+
+            center_x1 = 0
+
+            center_y1 = 0
+
+            center_x2 = 0
+
+            center_y2 = 0
+
+            depth1 = 0
+
+            depth2 = 0
+
+
+
+            # Run the YOLO model on the captured frame
+
+            results = model(images, stream=True)  # Get detection results from the YOLO model
+
+
+
+            # Process each detection
+
+            for r in results:
+
+                boxes = r.boxes  # Get the detected bounding boxes
+
+                
+
+                for box in boxes:
+
+                    # Get the confidence score and class ID
+
+                    confidence = math.ceil(box.conf[0] * 100) / 100  # Calculate and round the confidence score
+
+                    cls = int(box.cls[0])  # Get the class ID
+
+                    cls_name = classNames[cls]  # Get the class name from the list
+
+                    
+
+                    if (cls_name == "kale") and (confidence >= 0.3):
+
+                        # Get bounding box coordinates and convert them to integer
+
+                        x1, y1, x2, y2 = map(int, box.xyxy[0])  # Extract and convert bounding box coordinates
+
+                        
+
+                        if (x2 < 640):
+
+                            # Draw the bounding box on the frame
+
+                            cv2.rectangle(images, (x1, y1), (x2, y2), (255, 0, 255), 3)
+
+                        
+
+                            # Print detection details
+
+                            print(f"Confidence: {confidence}")
+
+                            print(f"Class name: {cls_name}")
+
+                            print(f"Frame: {frame_count}")
+
+                            print({x1})
+
+                            print({y1})
+
+                            print({x2})
+
+                            print({y2})
+
+                            print(f"Elapsed time: {datetime.datetime.now() - startTime}")
+
+
+
+                            # Prepare the label for the bounding box
+
+                            label = f'{cls_name} - {confidence}'
+
+
+
+                            # Draw the label on the frame
+
+                            org = (x1, y1)  # Set the position for the label
+
+                            font = cv2.FONT_HERSHEY_SIMPLEX  # Set the font for the label
+
+                            fontScale = 1  # Set the font scale
+
+                            color = (255, 0, 0)  # Set the color for the label
+
+                            thickness = 2  # Set the thickness of the label
+
+                            cv2.putText(images, label, org, font, fontScale, color, thickness)  # Draw the label
+
+                            
+
+                            kale_count += 1  # Increment crack count
+
+                            with open(output_file, 'a+') as f:
+
+                                f.write(f'kale{kale_count}: {confidence}\n')  # Log crack detection
+
+                            
+
+                            #comparing confidence levels and extracting the max and min values
+
+                            if (confidence > max_confidence):
+
+                                if (min_confidence == 0) or (min_confidence > max_confidence):
+
+                                    min_confidence = max_confidence
+
+                                
+
+                                max_confidence = confidence 
+
+                            
+
+                            elif (confidence < max_confidence):
+
+                                if (min_confidence == 0) or (min_confidence > confidence):
+
+                                    min_confidence = confidence
+
+                            
+
+                            #extracting depth at specific point
+
+                            if (max_confidence != 0):
+
+                                center_x1 = (x1 + x2) // 2
+
+                                center_y1 = (y1 + y2) // 2
+
+                                depth1 = get_depth_at_point(depth_frame, center_x1, center_y1)
+
+                                print(f"Depth at ({center_x1}, {center_y1}): {depth1} meters") 
+
+                    
+
+                            if (min_confidence != 0):
+
+                                center_x2 = (x1 + x2) // 2
+
+                                center_y2 = (y1 + y2) // 2
+
+                                depth2 = get_depth_at_point(depth_frame, center_x2, center_y2)
+
+                                print(f"Depth at ({center_x2}, {center_y2}): {depth2} meters") 
+
+                    
+
+                    if (cls_name == "QR") and (confidence >= 0.3):
+
+                        print("robot arm")
+
+                        x1, y1, x2, y2 = map(int, box.xyxy[0])
+
+                        move_arm_to_position(images, desired_position, tolerance, x1, y1, x2, y2, cls_name)
+
+
+
+                # Save the frame if any detections were made
+
+                if (kale_count >= 1):
+
+                    cv2.imwrite("/home/melvin/Projects/YOLO/FYP_presentation_leaf/Saved/FrameNum%d.jpg" % frame_count, images)  # Save the frame
+
+
+
+                    # Log the counts to the output file
+
+                    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")  # Get the current timestamp
+
+                    with open(output_file, 'a+') as f:
+
+                        f.write(f"Timestamp: {timestamp}\n")
+
+                        f.write(f"Frame: {frame_count}\n")
+
+                        f.write(f"Kale Count: {kale_count}\n\n")
+
+                        f.write(f"Minimum Confidence: {min_confidence}\n") 
+
+                        f.write(f"Maximum Confidence: {max_confidence}\n\n")
+
+                        
+
+                    with open(depth_file, 'a+') as f:
+
+                        f.write(f"For Maximum Confidence Detection, Depth at ({center_x1}, {center_y1}): {depth1} meters\n")
+
+                        f.write(f"For Minimum Confidence Detection, Depth at ({center_x2}, {center_y2}): {depth2} meters\n\n")
+
+                
+
+                    print(f"Depth at ({center_x1}, {center_y1}): {depth1} meters")
+
+                    print(f"Depth at ({center_x2}, {center_y2}): {depth2} meters")
+
+                
+
+                    #rounding to 2 decimal places
+
+                    depth1 = math.ceil(depth1 * 100) / 100
+
+                    depth2 = math.ceil(depth2 * 100) / 100
+
+                
+
+                #image preparation for node-red 
+
+                _, buffer = cv2.imencode('.jpg', images) # Encode the image (stored in `images`) to JPEG format and store it in `buffer`
+
+                img_base64 = base64.b64encode(buffer).decode('utf-8') # Encode the JPEG buffer to a base64 string
+
+                
+
+                # for node-red, adding data for posting to the payload
+
+                count_payload = {
+
+                    'Kale' : kale_count,
+
+                    'MaxConfidence' : max_confidence, 
+
+                    'MinConfidence' : min_confidence,
+
+                    'DepthAtMax' : depth1,
+
+                    'DepthAtMin' : depth2,
+
+                    'Image': img_base64
+
+                }
+
+                
+
+                # Send a POST request to the Node-RED endpoint with the payload as JSON
+
+                response = requests.post(url = node_red_url, json=count_payload)
+
+                print("send ", response.status_code)
+
+            
+
+                images = cv2.resize(images, (1600, 680))
+
+
+
+            cv2.imshow('RealSense', images)
+
+            key = cv2.waitKey(1)
+
+    finally:
+
+        pipeline.stop()
+
+        cv2.destroyAllWindows()  # Close all OpenCV windows
+
+
+
+    if ser:
+
+        ser.close()
+
+
+
+if __name__ == "__main__":
+
+    main()
