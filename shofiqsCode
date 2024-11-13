@@ -1,0 +1,90 @@
+import cv2
+import requests
+import threading
+import numpy as np
+from PIL import Image, ImageTk
+import tkinter as tk
+
+# Roboflow API information
+ROBOFLOW_API_KEY = "w2ZvpKEW0CE049fOqVBr"  # Replace with your actual API key
+ROBOFLOW_MODEL_URL = "https://detect.roboflow.com/strawberry-ml-detection-02/1"  # Replace with the correct URL for your model
+IMG_SIZE = 416  # Adjust the image size if needed
+
+# IP camera URL - replace with your IP camera's URL (DroidCam URL)
+ip_camera_url = "http://172.20.10.4:4747/video"  # Replace with your IP camera's URL
+
+# Open the IP camera stream
+cap = cv2.VideoCapture(ip_camera_url)
+
+# Initialize the Tkinter window
+window = tk.Tk()
+window.title("Strawberry Detection Live Feed")
+
+# Declare `label` as a global variable for use in the `update_frame` function
+label = tk.Label(window)
+label.pack()
+
+def get_predictions(frame):
+    frame_resized = cv2.resize(frame, (IMG_SIZE, IMG_SIZE))
+    retval, buffer = cv2.imencode('.jpg', frame_resized)
+    files = {
+        'file': ('frame.jpg', buffer.tobytes(), 'image/jpeg')
+    }
+    params = {
+        'api_key': ROBOFLOW_API_KEY,
+    }
+
+    try:
+        response = requests.post(ROBOFLOW_MODEL_URL, files=files, params=params)
+        response.raise_for_status()
+        predictions = response.json().get('predictions', [])
+        return predictions
+    except requests.exceptions.RequestException as e:
+        print(f"Request failed: {e}")
+        return []
+
+def update_frame():
+    global label  # Ensure label is accessed as a global variable
+    ret, frame = cap.read()
+    if ret:
+        # Get predictions from Roboflow
+        predictions = get_predictions(frame)
+
+        # Draw bounding boxes and labels
+        for pred in predictions:
+            x, y, width, height = pred['x'], pred['y'], pred['width'], pred['height']
+            label_text = pred['class']
+            confidence = pred['confidence']
+
+            start_point = (int(x - width / 2), int(y - height / 2))
+            end_point = (int(x + width / 2), int(y + height / 2))
+
+            cv2.rectangle(frame, start_point, end_point, (0, 255, 0), 2)
+            cv2.putText(
+                frame,
+                f"{label_text} ({confidence:.2f})",
+                (start_point[0], start_point[1] - 10),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                (36, 255, 12),
+                2
+            )
+
+        # Convert frame to RGB and display using PIL
+        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        img = Image.fromarray(frame_rgb)
+        imgtk = ImageTk.PhotoImage(image=img)
+        label.imgtk = imgtk  # Set the image to the label
+        label.configure(image=imgtk)
+
+    # Schedule the next frame update
+    window.after(10, update_frame)
+
+# Start the video feed update loop
+update_frame()
+
+# Run the Tkinter event loop
+window.mainloop()
+
+# Release resources
+cap.release()
