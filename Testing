@@ -1,12 +1,16 @@
 import cv2  # for camera vision task
 from ultralytics import YOLO  # YOLOv8 model
 import numpy as np  # used for numerical computing
+from tensorflow.keras.models import load_model  # TensorFlow/Keras for the second model
 
-# Load the pretrained YOLO model
-model = YOLO('/home/melvin/Projects/strawberry_runs/train36/weights/best.pt')  # Path to the trained YOLO model
+# Load the YOLOv8 model
+yolo_model = YOLO('C:\\Users\\22040264\\Documents\\_Schoolwork\\E300 FYP\\strawberry_runs\\strawberry_runs\\train36\\weights\\best.pt')
+
+# Load the second ML model (e.g., TensorFlow/Keras model)
+second_model = load_model('C:\\Users\\22040264\\Documents\\_Schoolwork\\E300 FYP\\second_model.h5')
 
 # IP camera URL (DroidCam if using phone or other IP camera URL)
-ip_camera_url = "http://192.168.0.102:4747/video"  # Replace with your IP camera's URL
+ip_camera_url = "http://10.175.37.251:4747/video"  # Replace with your IP camera's URL
 
 # Open the IP camera stream
 cap = cv2.VideoCapture(ip_camera_url)
@@ -14,6 +18,12 @@ cap = cv2.VideoCapture(ip_camera_url)
 if not cap.isOpened():
     print("Error: Unable to open the camera stream")
     exit()
+
+# Function to preprocess frames for the second model
+def preprocess_for_second_model(frame):
+    frame_resized = cv2.resize(frame, (224, 224))  # Resize frame to model input size
+    frame_normalized = frame_resized / 255.0  # Normalize pixel values
+    return np.expand_dims(frame_normalized, axis=0)  # Add batch dimension
 
 # Process each frame from the camera
 while cap.isOpened():
@@ -25,31 +35,26 @@ while cap.isOpened():
 
     print("Captured frame successfully")  # Debugging line
 
-    # Perform inference on the current frame
-    results = model(frame)  # Run inference on the current frame
+    # Perform inference with YOLOv8
+    yolo_results = yolo_model(frame)
+    yolo_detections = yolo_results[0]
 
-    # Access the first result in the results list
-    detections = results[0]  # `results` is a list; get the first detection object
+    if yolo_detections.boxes is not None:
+        # Extract YOLO detections
+        boxes = yolo_detections.boxes.xywh.cpu().numpy()
+        confidences = yolo_detections.boxes.conf.cpu().numpy()
+        class_ids = yolo_detections.boxes.cls.cpu().numpy().astype(int)
+        yolo_labels = yolo_model.names
 
-    # Check if there are any detections
-    if detections.boxes is not None:
-        # Extract the bounding boxes, confidences, and class IDs
-        boxes = detections.boxes.xywh.cpu().numpy()  # Bounding box coordinates
-        confidences = detections.boxes.conf.cpu().numpy()  # Confidence scores
-        class_ids = detections.boxes.cls.cpu().numpy().astype(int)  # Class IDs
-        labels = model.names  # Class names
-
-        # Draw bounding boxes and labels
+        # Draw YOLO detections
         for box, confidence, class_id in zip(boxes, confidences, class_ids):
             x, y, w, h = box
-            label_name = labels[class_id]
+            label_name = yolo_labels[class_id]
             confidence_score = confidence
 
-            # Calculate the top-left and bottom-right coordinates of the bounding box
             start_point = (int(x - w / 2), int(y - h / 2))
             end_point = (int(x + w / 2), int(y + h / 2))
 
-            # Draw bounding box and label on the frame
             cv2.rectangle(frame, start_point, end_point, (0, 255, 0), 2)
             cv2.putText(
                 frame,
@@ -60,6 +65,32 @@ while cap.isOpened():
                 (36, 255, 12),
                 2
             )
+
+    # Perform inference with the second model
+    preprocessed_frame = preprocess_for_second_model(frame)
+    second_model_predictions = second_model.predict(preprocessed_frame)
+
+    # Process the second model's results
+    if second_model_predictions[0][0] > 0.5:  # Example: binary classification
+        cv2.putText(
+            frame,
+            "Second Model: Positive",
+            (50, 50),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.7,
+            (255, 0, 0),
+            2
+        )
+    else:
+        cv2.putText(
+            frame,
+            "Second Model: Negative",
+            (50, 50),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.7,
+            (0, 0, 255),
+            2
+        )
 
     # Display the annotated frame
     cv2.imshow("Strawberry Ripeness Detection", frame)
