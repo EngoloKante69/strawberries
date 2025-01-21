@@ -1,0 +1,82 @@
+import cv2  # for camera vision task
+from ultralytics import YOLO  # YOLOv8 model
+import numpy as np  # used for numerical computing
+import threading  # for asynchronous frame capture
+
+# Load the pretrained YOLO model
+model = YOLO('C:\\Users\\joe\\Documents\\strawberry_runs\\strawberry_runs\\train36\\weights\\best.pt')  # Load the model
+model.to('cpu')  # Explicitly move the model to CPU
+
+# IP camera URL (DroidCam if using phone or other IP camera URL)
+ip_camera_url = "http://192.168.70.50:4747/video"  # Replace with your IP camera's URL
+
+class FrameCaptureThread(threading.Thread):
+    def __init__(self, src):
+        super().__init__()
+        self.cap = cv2.VideoCapture(src, cv2.CAP_FFMPEG)
+        self.frame = None
+        self.running = True
+
+        # Set frame resolution and frame rate
+        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+        self.cap.set(cv2.CAP_PROP_FPS, 15)
+
+    def run(self):
+        while self.running and self.cap.isOpened():
+            ret, self.frame = self.cap.read()
+            if not ret:
+                self.running = False
+
+    def stop(self):
+        self.running = False
+        self.cap.release()
+
+# Start frame capture thread
+frame_thread = FrameCaptureThread(ip_camera_url)
+frame_thread.start()
+
+# Main processing loop
+while frame_thread.running:
+    if frame_thread.frame is not None:
+        frame = frame_thread.frame.copy()
+
+        # Perform YOLO inference
+        results = model(frame)
+
+        # Access the first result in the results list
+        detections = results[0]  # `results` is a list; get the first detection object
+
+        if detections.boxes is not None:
+            boxes = detections.boxes.xywh.cpu().numpy()  # Bounding box coordinates
+            confidences = detections.boxes.conf.cpu().numpy()  # Confidence scores
+            class_ids = detections.boxes.cls.cpu().numpy().astype(int)  # Class IDs
+            labels = model.names  # Class names
+
+            for box, confidence, class_id in zip(boxes, confidences, class_ids):
+                x, y, w, h = box
+                label_name = labels[class_id]
+
+                start_point = (int(x - w / 2), int(y - h / 2))
+                end_point = (int(x + w / 2), int(y + h / 2))
+
+                cv2.rectangle(frame, start_point, end_point, (0, 255, 0), 2)
+                cv2.putText(
+                    frame,
+                    f"{label_name} ({confidence:.2f})",
+                    (start_point[0], start_point[1] - 10),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.5,
+                    (36, 255, 12),
+                    2
+                )
+
+        # Display the annotated frame
+        cv2.imshow("Strawberry Ripeness Detection", frame)
+
+    if cv2.waitKey(1) & 0xFF == ord('q'):
+        break
+
+# Stop the thread and cleanup
+frame_thread.stop()
+cv2.destroyAllWindows()
