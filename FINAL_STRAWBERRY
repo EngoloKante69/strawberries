@@ -1,0 +1,102 @@
+import cv2  # for camera vision task
+from ultralytics import YOLO  # YOLOv8 model
+import numpy as np  # used for numerical computing
+import requests  # to send data to Node-RED
+import base64  # to encode the frame as base64 for transmission
+import datetime  # for timestamping the data
+import json  # to handle the payload for Node-RED
+import time
+import threading  # To handle reading the log file without blocking the camera
+
+# Load the pretrained YOLO model
+model = YOLO('C:\\Users\\22040264\\Documents\\_Schoolwork\\E300 FYP\\strawberry_runs\\strawberry_runs\\train36\\weights\\best.pt')
+
+# Define the output file for logging
+log_file = "C:\\Users\\22040264\\Documents\\Login\\finaloutput.txt"  # Set the path for the output log file
+
+# IP camera URL (DroidCam if using phone or other IP camera URL)
+ip_camera_url = 'rtsp://192.168.0.168/12'
+
+# Node-RED endpoint URL
+node_red_url = "http://127.0.0.1:1880/strawberry"
+
+# Open the IP camera stream
+cap = cv2.VideoCapture(ip_camera_url)
+
+if not cap.isOpened():
+    print("Error: Unable to open the camera stream")
+    exit()
+
+def send_log_to_node_red():
+    """Reads the log file and sends data to Node-RED periodically."""
+    last_sent_content = ""
+    while True:
+        try:
+            with open(log_file, "r") as file:
+                content = file.read().strip()
+                if content and content != last_sent_content:
+                    # Extract data from the log file
+                    ripe = unripe = flower = rotten = 0
+                    for line in content.split("\n"):
+                        if "Ripe" in line:
+                            parts = line.split(", ")
+                            ripe = int(parts[0].split(":")[1].strip())
+                            unripe = int(parts[1].split(":")[1].strip())
+                            flower = int(parts[2].split(":")[1].strip())
+                            rotten = int(parts[3].split(":")[1].strip())
+                            break
+
+                    # Construct payload and send to Node-RED
+                    payload = {
+                        "ripe": ripe,
+                        "unripe": unripe,
+                        "flower": flower,
+                        "rotten": rotten
+                    }
+                    response = requests.post(node_red_url, json=payload)
+                    print(f"Sent data to Node-RED: {response.status_code}, Payload: {payload}")
+                    last_sent_content = content
+        except Exception as e:
+            print(f"Error reading log file or sending to Node-RED: {e}")
+
+        time.sleep(5)  # Check the log file every 5 seconds
+
+# Start the log file reader thread
+threading.Thread(target=send_log_to_node_red, daemon=True).start()
+
+# Camera Processing Loop
+while cap.isOpened():
+    ret, frame = cap.read()
+    if not ret:
+        print("Failed to capture frame")
+        break
+
+    # Perform inference on the current frame
+    results = model(frame)
+    detections = results[0]
+
+    # Annotate and display the frame
+    if detections.boxes is not None:
+        boxes = detections.boxes.xywh.cpu().numpy()
+        confidences = detections.boxes.conf.cpu().numpy()
+        class_ids = detections.boxes.cls.cpu().numpy().astype(int)
+        labels = model.names
+
+        for box, confidence, class_id in zip(boxes, confidences, class_ids):
+            x, y, w, h = box
+            label_name = labels[class_id]
+            start_point = (int(x - w / 2), int(y - h / 2))
+            end_point = (int(x + w / 2), int(y + h / 2))
+            cv2.rectangle(frame, start_point, end_point, (0, 255, 0), 2)
+            cv2.putText(frame, f"{label_name} ({confidence:.2f})",
+                        (start_point[0], start_point[1] - 10),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (36, 255, 12), 2)
+
+    # Display the annotated frame
+    cv2.imshow("Strawberry Ripeness Detection", frame)
+
+    if cv2.waitKey(1) & 0xFF == ord('q'):
+        break
+
+cap.release()
+cv2.destroyAllWindows()
