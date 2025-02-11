@@ -7,22 +7,14 @@ import datetime  # for timestamping the data
 import json  # to handle the payload for Node-RED
 
 # Load the pretrained YOLO model
-model = YOLO('/home/melvin/Projects/strawberry_runs/train40/weights/best.pt')  # Path to the trained YOLO model
+model =  YOLO(r'C:\Users\mdsya\Downloads\strawberry_runs\strawberry_runs\strawberry_runs\train36\weights\best.pt')  # Path to the trained YOLO model
+
 
 # Define the output file for logging
-log_file = "/home/melvin/Projects/FYP_Strawberry/humanoutput.txt"  # Set the path for the output log file
-
-
-# Function to clear the log file
-def clear_file(file):
-    with open(file, 'w') as file:
-        pass  # opening the file in 'w' mode will clear its content
-
-
-clear_file(log_file)  # log file is cleared before starting
+log_file = "C:\\Users\\mdsya\\OneDrive\\Desktop\\FinalOutput2.txt"  # Set the path for the output log file
 
 # IP camera URL (DroidCam if using phone or other IP camera URL)
-ip_camera_url = 'rtsp://192.168.0.168/12'  # Replace with your IP camera's URL
+ip_camera_url = 'http://192.168.1.101:4747/video'  # Replace with your IP camera's URL
 
 # Open the IP camera stream
 cap = cv2.VideoCapture(ip_camera_url)
@@ -32,14 +24,14 @@ if not cap.isOpened():
     exit()
 
 # Node-RED endpoint URL (update this based on your setup)
-node_red_url = "http://127.0.0.1:1880/human"  # Replace with your actual Node-RED URL
-
+node_red_url = "http://127.0.0.1:1880/strawberry"  # Replace with your actual Node-RED URL
 
 # Function to send data to Node-RED
-def send_to_nodered(human_count, max_confidence, min_confidence, frame):
+def send_to_nodered(ripe_count, unripe_count, flower_count, rotten_count, max_confidence, min_confidence, frame):
     # Encode the frame to base64
     _, buffer = cv2.imencode('.jpg', frame)
     img_base64 = base64.b64encode(buffer).decode('utf-8')  # Encode to base64 string
+
 
     max_confidence = float(max_confidence) if max_confidence != float('inf') else 0.0
     min_confidence = float(min_confidence) if min_confidence != float('inf') else 0.0
@@ -47,11 +39,14 @@ def send_to_nodered(human_count, max_confidence, min_confidence, frame):
 
     # Construct the payload for Node-RED
     count_payload = {
-        'Human': human_count,
+        'Ripe': ripe_count,
+        'Unripe': unripe_count,
+        'Flower': flower_count,
+        'Rotten': rotten_count,
         'MaxConfidence': max_confidence,
         'MinConfidence': min_confidence,
         'Image': img_base64,
-        'Timestamp': timestamp  # Add timestamp
+        'Timestamp': timestamp # Add timestamp
     }
 
     # Send a POST request to Node-RED
@@ -64,7 +59,7 @@ def send_to_nodered(human_count, max_confidence, min_confidence, frame):
         # Log the detection results into a text file
     with open(log_file, "a") as file:
         file.write(f"Timestamp: {timestamp}\n")
-        file.write(f"Human: {human_count}\n")
+        file.write(f"Ripe: {ripe_count}, Unripe: {unripe_count}, Flower: {flower_count}, Rotten: {rotten_count}\n")
         file.write(f"Max Confidence: {max_confidence:.2f}, Min Confidence: {min_confidence:.2f}\n")
         file.write("-" * 50 + "\n")  # Separator for better readability
 
@@ -85,7 +80,11 @@ while cap.isOpened():
     # Access the first result in the results list
     detections = results[0]  # results is a list; get the first detection object
 
-    human_count = 0
+
+    ripe_count = 0
+    unripe_count = 0
+    flower_count = 0
+    rotten_count = 0
     min_confidence = float('inf')
     max_confidence = 0
 
@@ -100,13 +99,18 @@ while cap.isOpened():
         # Draw bounding boxes and labels
         for box, confidence, class_id in zip(boxes, confidences, class_ids):
             x, y, w, h = box
-            labels[class_id] = "Human"
             label_name = labels[class_id]
             confidence_score = confidence
 
-            # Count humans
-            if label_name == 'Human':
-                human_count += 1
+            # Count different types of strawberries
+            if label_name == 'ripe':
+                ripe_count += 1
+            elif label_name == 'unripe':
+                unripe_count += 1
+            elif label_name == 'flower':
+                flower_count += 1
+            elif label_name == 'StrawberryRotten':
+                rotten_count += 1
 
             # Update max and min confidence scores
             max_confidence = max(max_confidence, confidence_score)
@@ -129,10 +133,10 @@ while cap.isOpened():
             )
 
     # Send the detection data to Node-RED
-    send_to_nodered(human_count, max_confidence, min_confidence, frame)
+    send_to_nodered(ripe_count, unripe_count, flower_count, rotten_count, max_confidence, min_confidence, frame)
 
     # Display the annotated frame
-    cv2.imshow("Human Ripeness Detection", frame)
+    cv2.imshow("Strawberry Ripeness Detection", frame)
 
     # Exit on pressing 'q'
     if cv2.waitKey(1) & 0xFF == ord('q'):
