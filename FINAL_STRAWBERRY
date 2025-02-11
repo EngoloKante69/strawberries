@@ -5,20 +5,16 @@ import requests  # to send data to Node-RED
 import base64  # to encode the frame as base64 for transmission
 import datetime  # for timestamping the data
 import json  # to handle the payload for Node-RED
-import time
-import threading  # To handle reading the log file without blocking the camera
 
 # Load the pretrained YOLO model
-model = YOLO('C:\\Users\\22040264\\Documents\\_Schoolwork\\E300 FYP\\strawberry_runs\\strawberry_runs\\train36\\weights\\best.pt')
+model =  YOLO(r'C:\Users\mdsya\Downloads\strawberry_runs\strawberry_runs\strawberry_runs\train36\weights\best.pt')  # Path to the trained YOLO model
+
 
 # Define the output file for logging
-log_file = "C:\\Users\\22040264\\Documents\\Login\\finaloutput.txt"  # Set the path for the output log file
+log_file = "C:\\Users\\mdsya\\OneDrive\\Desktop\\FinalOutput2.txt"  # Set the path for the output log file
 
 # IP camera URL (DroidCam if using phone or other IP camera URL)
-ip_camera_url = 'rtsp://192.168.0.168/12'
-
-# Node-RED endpoint URL
-node_red_url = "http://127.0.0.1:1880/strawberry"
+ip_camera_url = 'http://192.168.1.101:4747/video'  # Replace with your IP camera's URL
 
 # Open the IP camera stream
 cap = cv2.VideoCapture(ip_camera_url)
@@ -27,76 +23,125 @@ if not cap.isOpened():
     print("Error: Unable to open the camera stream")
     exit()
 
-def send_log_to_node_red():
-    """Reads the log file and sends data to Node-RED periodically."""
-    last_sent_content = ""
-    while True:
-        try:
-            with open(log_file, "r") as file:
-                content = file.read().strip()
-                if content and content != last_sent_content:
-                    # Extract data from the log file
-                    ripe = unripe = flower = rotten = 0
-                    for line in content.split("\n"):
-                        if "Ripe" in line:
-                            parts = line.split(", ")
-                            ripe = int(parts[0].split(":")[1].strip())
-                            unripe = int(parts[1].split(":")[1].strip())
-                            flower = int(parts[2].split(":")[1].strip())
-                            rotten = int(parts[3].split(":")[1].strip())
-                            break
+# Node-RED endpoint URL (update this based on your setup)
+node_red_url = "http://127.0.0.1:1880/strawberry"  # Replace with your actual Node-RED URL
 
-                    # Construct payload and send to Node-RED
-                    payload = {
-                        "ripe": ripe,
-                        "unripe": unripe,
-                        "flower": flower,
-                        "rotten": rotten
-                    }
-                    response = requests.post(node_red_url, json=payload)
-                    print(f"Sent data to Node-RED: {response.status_code}, Payload: {payload}")
-                    last_sent_content = content
-        except Exception as e:
-            print(f"Error reading log file or sending to Node-RED: {e}")
+# Function to send data to Node-RED
+def send_to_nodered(ripe_count, unripe_count, flower_count, rotten_count, max_confidence, min_confidence, frame):
+    # Encode the frame to base64
+    _, buffer = cv2.imencode('.jpg', frame)
+    img_base64 = base64.b64encode(buffer).decode('utf-8')  # Encode to base64 string
 
-        time.sleep(5)  # Check the log file every 5 seconds
 
-# Start the log file reader thread
-threading.Thread(target=send_log_to_node_red, daemon=True).start()
+    max_confidence = float(max_confidence) if max_confidence != float('inf') else 0.0
+    min_confidence = float(min_confidence) if min_confidence != float('inf') else 0.0
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-# Camera Processing Loop
+    # Construct the payload for Node-RED
+    count_payload = {
+        'Ripe': ripe_count,
+        'Unripe': unripe_count,
+        'Flower': flower_count,
+        'Rotten': rotten_count,
+        'MaxConfidence': max_confidence,
+        'MinConfidence': min_confidence,
+        'Image': img_base64,
+        'Timestamp': timestamp # Add timestamp
+    }
+
+    # Send a POST request to Node-RED
+    try:
+        response = requests.post(url=node_red_url, json=count_payload)
+        print(f"Sent data to Node-RED: {response.status_code}")
+    except Exception as e:
+        print(f"Error sending data to Node-RED: {e}")
+
+        # Log the detection results into a text file
+    with open(log_file, "a") as file:
+        file.write(f"Timestamp: {timestamp}\n")
+        file.write(f"Ripe: {ripe_count}, Unripe: {unripe_count}, Flower: {flower_count}, Rotten: {rotten_count}\n")
+        file.write(f"Max Confidence: {max_confidence:.2f}, Min Confidence: {min_confidence:.2f}\n")
+        file.write("-" * 50 + "\n")  # Separator for better readability
+
+
+# Process each frame from the camera
 while cap.isOpened():
     ret, frame = cap.read()
+
     if not ret:
         print("Failed to capture frame")
         break
 
+    print("Captured frame successfully")  # Debugging line
+
     # Perform inference on the current frame
-    results = model(frame)
-    detections = results[0]
+    results = model(frame)  # Run inference on the current frame
 
-    # Annotate and display the frame
+    # Access the first result in the results list
+    detections = results[0]  # results is a list; get the first detection object
+
+
+    ripe_count = 0
+    unripe_count = 0
+    flower_count = 0
+    rotten_count = 0
+    min_confidence = float('inf')
+    max_confidence = 0
+
+    # Check if there are any detections
     if detections.boxes is not None:
-        boxes = detections.boxes.xywh.cpu().numpy()
-        confidences = detections.boxes.conf.cpu().numpy()
-        class_ids = detections.boxes.cls.cpu().numpy().astype(int)
-        labels = model.names
+        # Extract the bounding boxes, confidences, and class IDs
+        boxes = detections.boxes.xywh.cpu().numpy()  # Bounding box coordinates
+        confidences = detections.boxes.conf.cpu().numpy()  # Confidence scores
+        class_ids = detections.boxes.cls.cpu().numpy().astype(int)  # Class IDs
+        labels = model.names  # Class names
 
+        # Draw bounding boxes and labels
         for box, confidence, class_id in zip(boxes, confidences, class_ids):
             x, y, w, h = box
             label_name = labels[class_id]
+            confidence_score = confidence
+
+            # Count different types of strawberries
+            if label_name == 'ripe':
+                ripe_count += 1
+            elif label_name == 'unripe':
+                unripe_count += 1
+            elif label_name == 'flower':
+                flower_count += 1
+            elif label_name == 'StrawberryRotten':
+                rotten_count += 1
+
+            # Update max and min confidence scores
+            max_confidence = max(max_confidence, confidence_score)
+            min_confidence = min(min_confidence, confidence_score)
+
+            # Calculate the top-left and bottom-right coordinates of the bounding box
             start_point = (int(x - w / 2), int(y - h / 2))
             end_point = (int(x + w / 2), int(y + h / 2))
+
+            # Draw bounding box and label on the frame
             cv2.rectangle(frame, start_point, end_point, (0, 255, 0), 2)
-            cv2.putText(frame, f"{label_name} ({confidence:.2f})",
-                        (start_point[0], start_point[1] - 10),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (36, 255, 12), 2)
+            cv2.putText(
+                frame,
+                f"{label_name} ({confidence_score:.2f})",
+                (start_point[0], start_point[1] - 10),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                (36, 255, 12),
+                2
+            )
+
+    # Send the detection data to Node-RED
+    send_to_nodered(ripe_count, unripe_count, flower_count, rotten_count, max_confidence, min_confidence, frame)
 
     # Display the annotated frame
     cv2.imshow("Strawberry Ripeness Detection", frame)
 
+    # Exit on pressing 'q'
     if cv2.waitKey(1) & 0xFF == ord('q'):
         break
 
+# Release resources
 cap.release()
 cv2.destroyAllWindows()
